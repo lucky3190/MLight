@@ -23,7 +23,7 @@ export default function ColumnActions({col, onDrop, onImpute, onNormalize, onEnc
         {method==='constant' && <input placeholder="value" value={value} onChange={e=>setValue(e.target.value)} />}
         <div className="controls">
           <button onClick={async ()=> { const ok = await onImpute(col, method, value); toast.showToast(ok? 'Imputation applied':'Imputation failed', ok? 'success':'error') }}>Apply</button>
-          <button onClick={async ()=> { const preview = await onPreview(col, method, value); if(preview) toast.showToast('Preview ready — check console for details','info'); console.log('Imputation preview', preview) }}>Preview</button>
+          <button onClick={async ()=> { const preview = await onPreview(col, method, value); if(preview && typeof onPreview.show === 'function') { onPreview.show(preview) } else { if(preview) toast.showToast('Preview ready — check console for details','info'); console.log('Imputation preview', preview) } }}>Preview</button>
         </div>
       </div>
 

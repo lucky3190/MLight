@@ -469,6 +469,60 @@ export function DataProvider({children}){
     }
   }
 
+  // Create an in-memory snapshot (records + columns + CSV text if available)
+  async function createSnapshot(){
+    try{
+      let csvText = null
+      if(pyodide){
+        try{
+          const out = await pyodide.runPythonAsync(`import io\nbuf = io.StringIO()\ndf.to_csv(buf, index=False)\nbuf.getvalue()`)
+          csvText = out.toString()
+        }catch(e){
+          // ignore, we'll fallback to JS-built CSV
+        }
+      }
+      let recs = records
+      let cols = columns
+      if(!csvText){
+        // Build CSV text from JS snapshot for portability
+        if(records && records.length){
+          const colsList = columns && columns.length? columns : Object.keys(records[0])
+          const lines = [colsList.join(',')]
+          for(const r of records){
+            const row = colsList.map(c=> {
+              const v = r[c]
+              if(v===null || v===undefined) return ''
+              const s = String(v).replace(/"/g,'""')
+              return s.includes(',') || s.includes('\n') ? `"${s}"` : s
+            })
+            lines.push(row.join(','))
+          }
+          csvText = lines.join('\n')
+        }
+      }
+      return {records: recs, columns: cols, csv: csvText}
+    }catch(e){ setError(e); return null }
+  }
+
+  // Restore a snapshot created by createSnapshot
+  async function restoreSnapshot(snapshot){
+    if(!snapshot) return false
+    try{
+      if(snapshot.csv && pyodide){
+        // prefer importing via pyodide to rebuild df
+        await loadCSVFromText(snapshot.csv)
+        return true
+      }
+      if(snapshot.records){
+        setRecords(snapshot.records)
+      }
+      if(snapshot.columns){
+        setColumns(snapshot.columns)
+      }
+      return true
+    }catch(e){ setError(e); return false }
+  }
+
   const value = {
     pyodide,
     loadingPyodide,
@@ -487,7 +541,8 @@ export function DataProvider({children}){
     encodeCategoricals,
     trainModels
     ,saveFileToIDB,getFileFromIDB, describeData, saveCurrentDataToIDB, runFullColumnSummary,
-    dropColumn, imputeColumn, normalizeColumn, encodeColumn, previewImputation
+    dropColumn, imputeColumn, normalizeColumn, encodeColumn, previewImputation,
+    createSnapshot, restoreSnapshot
   }
 
   return (
