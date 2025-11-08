@@ -84,7 +84,7 @@ export function DataProvider({children}){
     setCsvText(text)
     // pass the csv text into the pyodide globals to avoid quoting issues
     pyodide.globals.set('csv_text', text)
-    const code = `import pandas as pd, io\ntry:\n    df = pd.read_csv(io.StringIO(csv_text))\n    globals()['df']=df\n    res = df.head().to_json(orient='records')\n    cols = list(df.columns)\n    out = (res, cols)\nexcept Exception as e:\n    out = ('__ERROR__' + str(e), [])\nout`
+    const code = `import pandas as pd, io\ntry:\n    df = pd.read_csv(io.StringIO(csv_text))\n    # trim whitespace for string/object columns to normalize values like ' Male' -> 'Male'\n    try:\n        for c in df.select_dtypes(include=['object','string']).columns:\n            df[c] = df[c].astype(str).str.strip()\n    except Exception:\n        pass\n    globals()['df']=df\n    res = df.head().to_json(orient='records')\n    cols = list(df.columns)\n    out = (res, cols)\nexcept Exception as e:\n    out = ('__ERROR__' + str(e), [])\nout`
     const out = await pyodide.runPythonAsync(code)
     try{
       const js = out.toJs ? out.toJs() : out
@@ -176,22 +176,13 @@ export function DataProvider({children}){
     // method: 'mean','median','mode','constant','ffill','bfill'
     if(pyodide){
       try{
+        // set helpers
         pyodide.globals.set('colname', col)
-        if(method==='constant'){
-          pyodide.globals.set('fillval', value)
-          await pyodide.runPythonAsync(`df[colname] = df[colname].fillna(fillval)`)
-        }else if(method==='mean'){
-          await pyodide.runPythonAsync(`df[colname] = df[colname].astype(float).fillna(df[colname].astype(float).mean())`)
-        }else if(method==='median'){
-          await pyodide.runPythonAsync('df[colname] = df[colname].astype(float).fillna(df[colname].astype(float).median())')
-        }else if(method==='mode'){
-          await pyodide.runPythonAsync(`df[colname] = df[colname].fillna(df[colname].mode().iloc[0] if not df[colname].mode().empty else df[colname].iloc[0])`)
-        }else if(method==='ffill' || method==='bfill'){
-          const dir = method==='ffill' ? 'ffill' : 'bfill'
-          await pyodide.runPythonAsync(`df[colname] = df[colname].fillna(method='${dir}')`)
-        }
-        // update preview
-        const out = await pyodide.runPythonAsync(`res = df.head().to_json(orient='records')\nres`)
+        pyodide.globals.set('method', method)
+        if(method==='constant') pyodide.globals.set('fillval', value)
+        // use pd.to_numeric with strip + errors='coerce' to avoid ValueError on non-numeric strings
+        const code = `import pandas as pd\n# coerce values to numeric where possible, trimming whitespace first\ns = pd.to_numeric(df[colname].astype(str).str.strip(), errors='coerce')\nif method == 'constant':\n    df[colname] = df[colname].fillna(fillval)\nelif method == 'mean':\n    df[colname] = s.fillna(s.mean())\nelif method == 'median':\n    df[colname] = s.fillna(s.median())\nelif method == 'mode':\n    try:\n        m = s.mode()\n        fill = m.iloc[0] if len(m) else None\n    except Exception:\n        fill = None\n    df[colname] = s.fillna(fill)\nelif method in ('ffill','bfill'):\n    dir = 'ffill' if method=='ffill' else 'bfill'\n    df[colname] = s.fillna(method=dir)\nres = df.head().to_json(orient='records')\nres`
+        const out = await pyodide.runPythonAsync(code)
         const parsed = JSON.parse(out.toString())
         setRecords(parsed)
         return true
@@ -227,7 +218,7 @@ export function DataProvider({children}){
     if(pyodide){
       try{
         pyodide.globals.set('colname', col)
-        const code = `s = df[colname].astype(float)\nminv = s.min()\nmaxv = s.max()\ndf[colname] = (s - minv) / (maxv - minv)\nres = df.head().to_json(orient='records')\nres`
+        const code = `import pandas as pd\n# coerce numeric values after trimming whitespace\ns = pd.to_numeric(df[colname].astype(str).str.strip(), errors='coerce')\nminv = s.min()\nmaxv = s.max()\n# normalize into 0..1 (NaNs remain NaN)\ndf[colname] = (s - minv) / (maxv - minv)\nres = df.head().to_json(orient='records')\nres`
         const out = await pyodide.runPythonAsync(code)
         const parsed = JSON.parse(out.toString())
         setRecords(parsed)
@@ -270,11 +261,13 @@ export function DataProvider({children}){
     // Return an array of before/after sample values for the column
     if(pyodide){
       try{
-        pyodide.globals.set('colname', col)
-        if(method==='constant') pyodide.globals.set('fillval', value)
-        const code = `s = df[colname].copy()\nif '${method}' == 'constant':\n    s = s.fillna(fillval)\nelif '${method}' == 'mean':\n    s = s.astype(float).fillna(s.astype(float).mean())\nelif '${method}' == 'median':\n    s = s.astype(float).fillna(s.astype(float).median())\nelif '${method}' == 'mode':\n    s = s.fillna(s.mode().iloc[0] if not s.mode().empty else None)\nres = [{'before': str(v_before), 'after': str(v_after)} for v_before, v_after in zip(df[colname].head(10).tolist(), s.head(10).tolist())]\nimport json\njson.dumps(res)`
-        const out = await pyodide.runPythonAsync(code)
-        return JSON.parse(out.toString())
+          // set globals for python code
+          pyodide.globals.set('colname', col)
+          pyodide.globals.set('method', method)
+          if(method==='constant') pyodide.globals.set('fillval', value)
+          const code = `import pandas as pd\n# create a numeric-coerced preview (trim whitespace and coerce non-numeric to NaN)\ns = pd.to_numeric(df[colname].astype(str).str.strip(), errors='coerce')\nif method == 'constant':\n    s = df[colname].fillna(fillval)\nelif method == 'mean':\n    s = s.fillna(s.mean())\nelif method == 'median':\n    s = s.fillna(s.median())\nelif method == 'mode':\n    try:\n        m = s.mode()\n        fill = m.iloc[0] if len(m) else None\n    except Exception:\n        fill = None\n    s = s.fillna(fill)\nres = [{'before': str(v_before), 'after': str(v_after)} for v_before, v_after in zip(df[colname].head(10).tolist(), s.head(10).tolist())]\nimport json\njson.dumps(res)`
+          const out = await pyodide.runPythonAsync(code)
+          return JSON.parse(out.toString())
       }catch(e){ setError(e); return null }
     }
     // JS fallback
