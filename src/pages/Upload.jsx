@@ -57,7 +57,7 @@ function parseCSV(text, maxRows = 50){
 }
 
 export default function Upload(){
-  const { loadCSVFromText, records, columns, loadingPyodide } = useData()
+  const { loadCSVFromText, records, columns, loadingPyodide, saveFileToIDB } = useData()
   const [localRecords, setLocalRecords] = useState(null)
   const [localColumns, setLocalColumns] = useState([])
   const [status, setStatus] = useState('')
@@ -76,6 +76,8 @@ export default function Upload(){
         setLocalRecords(null)
         setLocalColumns([])
         setStatus('Preview loaded via Pyodide')
+        // persist the uploaded file blob for reuse across pages
+        try{ await saveFileToIDB('uploaded.csv', f) }catch(_){ /* non-critical */ }
       }catch(err){
         // fallback to JS parser for quick preview
         console.warn('Pyodide preview failed, falling back to JS parser', err)
@@ -83,6 +85,7 @@ export default function Upload(){
         setLocalColumns(parsed.columns)
         setLocalRecords(parsed.records)
         setStatus('Preview parsed in-browser (JS fallback)')
+        try{ await saveFileToIDB('uploaded.csv', f) }catch(_){ /* non-critical */ }
       }
     }
     reader.readAsText(f)

@@ -6,8 +6,12 @@ import Visualize from './pages/Visualize'
 import Engineer from './pages/Engineer'
 import Model from './pages/Model'
 import Compare from './pages/Compare'
+import { useData } from './context/DataContext'
+import Spinner from './components/Spinner'
+import ErrorBanner from './components/ErrorBanner'
 
 export default function App(){
+  const { loadingPyodide, installingPackages, installMessage, error, setError } = useData()
   return (
     <div className="app-shell">
       <div className="topbar">
@@ -28,6 +32,12 @@ export default function App(){
           <NavLink to="/compare" className={({isActive})=>isActive? 'active':''}>Compare</NavLink>
         </nav>
       </div>
+      {error && <ErrorBanner error={error} onClose={()=>setError(null)} />}
+      {(loadingPyodide || installingPackages) && (
+        <div className="card" style={{marginBottom:12}}>
+          <Spinner message={installMessage || (loadingPyodide? 'Loading Pyodide...' : 'Installing packages...')} />
+        </div>
+      )}
 
       <div className="card">
         <Routes>
