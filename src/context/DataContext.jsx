@@ -516,6 +516,196 @@ export function DataProvider({children}){
     }catch(e){ setError(e); return false }
   }
 
+  // Get rows where a column has missing values (returns first 100 rows max)
+  async function getMissingRows(col){
+    if(!col) return null
+    if(pyodide){
+      try{
+        pyodide.globals.set('colname', col)
+        const code = `
+import pandas as pd
+import numpy as np
+
+def get_missing_rows(df, col):
+    missing = df[df[col].isna()]
+    total_missing = len(missing)
+    preview = missing.head(100)
+    return {
+        'total': total_missing,
+        'preview': preview.to_dict('records') if total_missing > 0 else []
+    }
+
+result = get_missing_rows(df, '${col}')
+result
+`;
+        const result = await pyodide.runPythonAsync(code);
+        return result.toJs();
+      } catch (err) {
+        setError(`Error getting missing rows: ${err.message}`);
+        return { total: 0, preview: [] };
+      }
+    }
+    // JS fallback: filter records with null/undefined/empty values
+    try {
+      const missing = records.filter(r => {
+        const v = r[col];
+        return v === null || v === undefined || v === '';
+      });
+      return {
+        total: missing.length,
+        preview: missing.slice(0, 100)
+      };
+    } catch (e) { 
+      setError(e);
+      return { total: 0, preview: [] };
+    }
+  };
+
+  // Preview numeric coercion for a column
+  async function previewCoerceNumeric(col){
+    if(!col) return null;
+    if(pyodide){
+      try {
+        const pyCode = `
+import pandas as pd
+import numpy as np
+
+def preview_coerce_numeric(df, col):
+    s = df[col].astype(str).str.strip()
+    converted = pd.to_numeric(s, errors='coerce')
+    total = len(s)
+    success = (~pd.isna(converted)).sum()
+    failed = pd.isna(converted).sum()
+    
+    # Get sample of successful and failed conversions
+    success_samples = df[~pd.isna(converted)][col].head(5).to_dict()
+    failed_samples = df[pd.isna(converted)][col].head(5).to_dict()
+    
+    return {
+        'total': int(total),
+        'success': int(success),
+        'failed': int(failed),
+        'success_rate': float(success / total * 100),
+        'success_samples': success_samples,
+        'failed_samples': failed_samples
+    }
+
+result = preview_coerce_numeric(df, '${col}')
+result
+`;
+        const result = await pyodide.runPythonAsync(pyCode);
+        return result.toJs();
+      } catch (err) {
+        setError(`Error previewing numeric coercion: ${err.message}`);
+        return {
+          total: 0,
+          success: 0,
+          failed: 0,
+          success_rate: 0,
+          success_samples: {},
+          failed_samples: {}
+        };
+      }
+    }
+    // JS fallback
+    try {
+      const values = records.map(r => r[col]);
+      const total = values.length;
+      const coerced = values.filter(v => {
+        if (v === null || v === undefined || v === '') return false;
+        const n = Number(String(v).trim());
+        return Number.isFinite(n);
+      }).length;
+      
+      const successValues = {};
+      const failedValues = {};
+      let successCount = 0;
+      let failedCount = 0;
+      
+      for (const r of records) {
+        const v = r[col];
+        const n = Number(String(v).trim());
+        if (Number.isFinite(n)) {
+          if (successCount < 5) {
+            successValues[successCount] = v;
+            successCount++;
+          }
+        } else {
+          if (failedCount < 5) {
+            failedValues[failedCount] = v;
+            failedCount++;
+          }
+        }
+        if (successCount >= 5 && failedCount >= 5) break;
+      }
+      
+      return {
+        total,
+        success: coerced,
+        failed: total - coerced,
+        success_rate: (coerced / total) * 100,
+        success_samples: successValues,
+        failed_samples: failedValues
+      };
+    } catch (e) {
+      setError(e);
+      return {
+        total: 0,
+        success: 0,
+        failed: 0,
+        success_rate: 0,
+        success_samples: {},
+        failed_samples: {}
+      };
+    }
+  };
+
+  // Permanently coerce column to numeric
+  async function coerceColumnToNumeric(col){
+    if(!col) return false;
+    if(pyodide){
+      try {
+        const pyCode = `
+import pandas as pd
+import numpy as np
+
+def coerce_to_numeric(df, col):
+    s = df[col].astype(str).str.strip()
+    df[col] = pd.to_numeric(s, errors='coerce')
+    return df[col].to_dict()
+
+result = coerce_to_numeric(df, '${col}')
+result
+`;
+        const result = await pyodide.runPythonAsync(pyCode);
+        // Update records with the new column values
+        const newColValues = result.toJs();
+        const updatedRecords = records.map((record, idx) => ({
+          ...record,
+          [col]: newColValues[idx] || null
+        }));
+        setRecords(updatedRecords);
+        return true;
+      } catch (err) {
+        setError(`Error coercing to numeric: ${err.message}`);
+        return false;
+      }
+    }
+    // JS fallback
+    try {
+      const newRecords = records.map(r => {
+        const v = r[col];
+        const n = v === null || v === undefined || v === '' ? null : Number(String(v).trim());
+        return {...r, [col]: Number.isFinite(n) ? n : null};
+      });
+      setRecords(newRecords);
+      return true;
+    } catch (e) {
+      setError(e);
+      return false;
+    }
+  };
+
   const value = {
     pyodide,
     loadingPyodide,
@@ -532,10 +722,22 @@ export function DataProvider({children}){
     cleanDropNA,
     fillMissing,
     encodeCategoricals,
-    trainModels
-    ,saveFileToIDB,getFileFromIDB, describeData, saveCurrentDataToIDB, runFullColumnSummary,
-    dropColumn, imputeColumn, normalizeColumn, encodeColumn, previewImputation,
-    createSnapshot, restoreSnapshot
+    trainModels,
+    saveFileToIDB,
+    getFileFromIDB,
+    describeData,
+    saveCurrentDataToIDB,
+    runFullColumnSummary,
+    dropColumn,
+    imputeColumn,
+    normalizeColumn,
+    encodeColumn,
+    previewImputation,
+    createSnapshot,
+    restoreSnapshot,
+    getMissingRows,
+    previewCoerceNumeric,
+    coerceColumnToNumeric
   }
 
   return (
