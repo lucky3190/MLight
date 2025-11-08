@@ -149,6 +149,159 @@ export function DataProvider({children}){
     return {records:parsed, columns:cols}
   }
 
+  // Column-level operations
+  async function dropColumn(col){
+    if(pyodide){
+      try{
+        pyodide.globals.set('colname', col)
+        const code = `df.drop(columns=[colname], inplace=True)\nres = df.head().to_json(orient='records')\ncols = list(df.columns)\nres, cols`
+        const out = await pyodide.runPythonAsync(code)
+        const js = out.toJs ? out.toJs() : out
+        const [jsonStr, cols] = js
+        const parsed = JSON.parse(jsonStr)
+        setRecords(parsed); setColumns(cols)
+        return true
+      }catch(e){ setError(e); return false }
+    }
+    // JS fallback: modify records array snapshot
+    try{
+      const newRecords = records.map(r=>{ const nr = {...r}; delete nr[col]; return nr })
+      const newCols = columns.filter(c=> c!==col)
+      setRecords(newRecords); setColumns(newCols)
+      return true
+    }catch(e){ setError(e); return false }
+  }
+
+  async function imputeColumn(col, method, value=null){
+    // method: 'mean','median','mode','constant','ffill','bfill'
+    if(pyodide){
+      try{
+        pyodide.globals.set('colname', col)
+        if(method==='constant'){
+          pyodide.globals.set('fillval', value)
+          await pyodide.runPythonAsync(`df[colname] = df[colname].fillna(fillval)`)
+        }else if(method==='mean'){
+          await pyodide.runPythonAsync(`df[colname] = df[colname].astype(float).fillna(df[colname].astype(float).mean())`)
+        }else if(method==='median'){
+          await pyodide.runPythonAsync(`df[colname] = df[colname].astype(float).fillna(df[colname'].astype(float).median())`)
+        }else if(method==='mode'){
+          await pyodide.runPythonAsync(`df[colname] = df[colname].fillna(df[colname].mode().iloc[0] if not df[colname].mode().empty else df[colname].iloc[0])`)
+        }else if(method==='ffill' || method==='bfill'){
+          const dir = method==='ffill' ? 'ffill' : 'bfill'
+          await pyodide.runPythonAsync(`df[colname] = df[colname].fillna(method='${dir}')`)
+        }
+        // update preview
+        const out = await pyodide.runPythonAsync(`res = df.head().to_json(orient='records')\nres`)
+        const parsed = JSON.parse(out.toString())
+        setRecords(parsed)
+        return true
+      }catch(e){ setError(e); return false }
+    }
+    // JS fallback operate on records snapshot
+    try{
+      const newRecords = records.map(r=> ({...r}))
+      const colVals = newRecords.map(r=> r[col]).filter(v=> v!==null && v!==undefined && v!=="")
+      if(method==='mean'){
+        const nums = colVals.map(Number).filter(n=> Number.isFinite(n))
+        const mean = nums.reduce((a,b)=>a+b,0)/ (nums.length||1)
+        newRecords.forEach(r=>{ if(r[col]===null||r[col]===''||r[col]===undefined) r[col]=mean })
+      }else if(method==='median'){
+        const nums = colVals.map(Number).filter(n=> Number.isFinite(n)).sort((a,b)=>a-b)
+        const mid = Math.floor(nums.length/2)
+        const median = nums.length? (nums.length%2? nums[mid] : (nums[mid-1]+nums[mid])/2) : null
+        newRecords.forEach(r=>{ if(r[col]===null||r[col]===''||r[col]===undefined) r[col]=median })
+      }else if(method==='mode'){
+        const freq = {}
+        colVals.forEach(v=>{ freq[v]= (freq[v]||0)+1 })
+        const mode = Object.entries(freq).sort((a,b)=>b[1]-a[1])[0]?.[0] || null
+        newRecords.forEach(r=>{ if(r[col]===null||r[col]===''||r[col]===undefined) r[col]=mode })
+      }else if(method==='constant'){
+        newRecords.forEach(r=>{ if(r[col]===null||r[col]===''||r[col]===undefined) r[col]=value })
+      }
+      setRecords(newRecords)
+      return true
+    }catch(e){ setError(e); return false }
+  }
+
+  async function normalizeColumn(col){
+    if(pyodide){
+      try{
+        pyodide.globals.set('colname', col)
+        const code = `s = df[colname].astype(float)\nminv = s.min()\nmaxv = s.max()\ndf[colname] = (s - minv) / (maxv - minv)\nres = df.head().to_json(orient='records')\nres`
+        const out = await pyodide.runPythonAsync(code)
+        const parsed = JSON.parse(out.toString())
+        setRecords(parsed)
+        return true
+      }catch(e){ setError(e); return false }
+    }
+    try{
+      const nums = records.map(r=> Number(r[col])).filter(n=> Number.isFinite(n))
+      const minv = Math.min(...nums); const maxv = Math.max(...nums)
+      const newRecords = records.map(r=> ({...r, [col]: Number.isFinite(Number(r[col])) ? (Number(r[col]) - minv)/(maxv-minv||1) : r[col]}))
+      setRecords(newRecords)
+      return true
+    }catch(e){ setError(e); return false }
+  }
+
+  async function encodeColumn(col){
+    if(pyodide){
+      try{
+        pyodide.globals.set('colname', col)
+        const code = `df[colname] = df[colname].astype('category').cat.codes\nres = df.head().to_json(orient='records')\nres, list(df[colname].dtype.categories) if hasattr(df[colname].dtype, 'categories') else (res, [])`
+        const out = await pyodide.runPythonAsync(code)
+        const js = out.toJs ? out.toJs() : out
+        const [jsonStr, cats] = js
+        const parsed = JSON.parse(jsonStr)
+        setRecords(parsed)
+        return {categories: cats}
+      }catch(e){ setError(e); return null }
+    }
+    // JS fallback: map unique values to codes
+    try{
+      const vals = Array.from(new Set(records.map(r=> r[col])))
+      const map = Object.fromEntries(vals.map((v,i)=>[v,i]))
+      const newRecords = records.map(r=> ({...r, [col]: map[r[col]]}))
+      setRecords(newRecords)
+      return {categories: vals}
+    }catch(e){ setError(e); return null }
+  }
+
+  async function previewImputation(col, method, value=null){
+    // Return an array of before/after sample values for the column
+    if(pyodide){
+      try{
+        pyodide.globals.set('colname', col)
+        if(method==='constant') pyodide.globals.set('fillval', value)
+        const code = `s = df[colname].copy()\nif '${method}' == 'constant':\n    s = s.fillna(fillval)\nelif '${method}' == 'mean':\n    s = s.astype(float).fillna(s.astype(float).mean())\nelif '${method}' == 'median':\n    s = s.astype(float).fillna(s.astype(float).median())\nelif '${method}' == 'mode':\n    s = s.fillna(s.mode().iloc[0] if not s.mode().empty else None)\nres = [{'before': str(v_before), 'after': str(v_after)} for v_before, v_after in zip(df[colname].head(10).tolist(), s.head(10).tolist())]\nimport json\njson.dumps(res)`
+        const out = await pyodide.runPythonAsync(code)
+        return JSON.parse(out.toString())
+      }catch(e){ setError(e); return null }
+    }
+    // JS fallback
+    try{
+      const sample = records.slice(0,10).map(r=> r[col])
+      const after = []
+      if(method==='mean'){
+        const nums = records.map(r=> Number(r[col])).filter(n=> Number.isFinite(n))
+        const mean = nums.reduce((a,b)=>a+b,0)/(nums.length||1)
+        after.push(...sample.map(v=> (v===null||v===''||v===undefined)? mean : v))
+      }else if(method==='median'){
+        const nums = records.map(r=> Number(r[col])).filter(n=> Number.isFinite(n)).sort((a,b)=>a-b)
+        const mid = Math.floor(nums.length/2); const median = nums.length? (nums.length%2? nums[mid] : (nums[mid-1]+nums[mid])/2) : null
+        after.push(...sample.map(v=> (v===null||v===''||v===undefined)? median : v))
+      }else if(method==='mode'){
+        const freq = {}; records.forEach(r=>{ const v=r[col]; if(v!==null&&v!==undefined&&v!=='') freq[v]=(freq[v]||0)+1 })
+        const mode = Object.entries(freq).sort((a,b)=>b[1]-a[1])[0]?.[0]||null
+        after.push(...sample.map(v=> (v===null||v===''||v===undefined)? mode : v))
+      }else if(method==='constant'){
+        after.push(...sample.map(v=> (v===null||v===''||v===undefined)? value : v))
+      }else{
+        after.push(...sample)
+      }
+      return sample.map((before,i)=> ({before, after: after[i]}))
+    }catch(e){ setError(e); return null }
+  }
+
   // Describe data (dtypes, missing counts, uniques, numeric stats) — Pyodide preferred, JS fallback
   async function describeData(){
     // Try Pyodide + pandas if available and df exists
