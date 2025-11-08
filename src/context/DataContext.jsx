@@ -183,7 +183,7 @@ export function DataProvider({children}){
         }else if(method==='mean'){
           await pyodide.runPythonAsync(`df[colname] = df[colname].astype(float).fillna(df[colname].astype(float).mean())`)
         }else if(method==='median'){
-          await pyodide.runPythonAsync(`df[colname] = df[colname].astype(float).fillna(df[colname'].astype(float).median())`)
+          await pyodide.runPythonAsync('df[colname] = df[colname].astype(float).fillna(df[colname].astype(float).median())')
         }else if(method==='mode'){
           await pyodide.runPythonAsync(`df[colname] = df[colname].fillna(df[colname].mode().iloc[0] if not df[colname].mode().empty else df[colname].iloc[0])`)
         }else if(method==='ffill' || method==='bfill'){
@@ -304,50 +304,58 @@ export function DataProvider({children}){
 
   // Describe data (dtypes, missing counts, uniques, numeric stats) — Pyodide preferred, JS fallback
   async function describeData(){
-    // Try Pyodide + pandas if available and df exists
+    // Prefer Pyodide + pandas if available
     if(pyodide){
       try{
-        const code = `import json\nfrom pandas.api.types import is_numeric_dtype\nout = {}\nfor c in df.columns:\n    s = df[c]\n    info = {'dtype': str(s.dtype), 'missing': int(s.isnull().sum()), 'unique': int(s.nunique())}\n    if is_numeric_dtype(s):\n        nonnull = s.dropna()\n        if len(nonnull):\n            info.update({'mean': float(nonnull.mean()), 'std': float(nonnull.std()), 'min': float(nonnull.min()), 'max': float(nonnull.max())})\n        else:\n            info.update({'mean': None, 'std': None, 'min': None, 'max': None})\n    out[c]=info\njson.dumps(out)`
+        const code = `import json\nfrom pandas.api.types import is_numeric_dtype\nout = {}\nfor c in df.columns:\n    s = df[c]\n    info = {'dtype': str(s.dtype), 'missing': int(s.isnull().sum()), 'unique': int(s.nunique())}\n    # numeric stats\n    if is_numeric_dtype(s):\n        nonnull = s.dropna()\n        if len(nonnull):\n            q = nonnull.quantile([0.25,0.5,0.75])\n            info.update({'mean': float(nonnull.mean()), 'std': float(nonnull.std()), 'min': float(nonnull.min()), 'max': float(nonnull.max()), 'q1': float(q.loc[0.25]), 'median': float(q.loc[0.5]), 'q3': float(q.loc[0.75])})\n        else:\n            info.update({'mean': None, 'std': None, 'min': None, 'max': None, 'q1': None, 'median': None, 'q3': None})\n    else:\n        # top categories for non-numeric\n        top = s.value_counts().head(5).to_dict()\n        info.update({'top_categories': list(top.items())})\n    # mode (may be NaN)\n    try:\n        m = s.mode()\n        info['mode'] = str(m.iloc[0]) if len(m) else None\n    except Exception:\n        info['mode'] = None\n    out[c]=info\njson.dumps(out)`
         const out = await pyodide.runPythonAsync(code)
         const jsonStr = out.toString()
         return JSON.parse(jsonStr)
       }catch(e){
         console.warn('describeData via Pyodide failed', e)
         setError(e)
-        // fallthrough to JS fallback
+        // fall through to JS fallback
       }
     }
 
-    // JS fallback using current `records`
+    // JS fallback using current `records` snapshot
     if(!records || records.length===0) return null
     try{
       const cols = columns && columns.length? columns : Object.keys(records[0] || {})
       const summary = {}
       for(const c of cols){
         const vals = records.map(r=> r[c])
+        const total = vals.length
         const missing = vals.filter(v=> v===null || v===undefined || v==='').length
-        const uniq = new Set(vals.filter(v=> v!==null && v!==undefined && v!=='')).size
-        // type inference: numeric if all non-missing parseFloat ok
         const nonMissing = vals.filter(v=> v!==null && v!==undefined && v!=='')
-        let numeric = true
-        const numericVals = []
-        for(const v of nonMissing){
-          const n = Number(v)
-          if(Number.isFinite(n)) numericVals.push(n)
-          else { numeric = false; break }
-        }
-        const info = {dtype: numeric? 'number' : 'string', missing, unique: uniq}
+        const uniqSet = new Set(nonMissing)
+        const uniq = uniqSet.size
+        // type inference: numeric if most values coerce to finite numbers
+        const numericVals = nonMissing.map(v=> Number(v)).filter(n=> Number.isFinite(n))
+        const numeric = numericVals.length >= Math.max(1, Math.floor(nonMissing.length * 0.6))
+        const info = {dtype: numeric? 'number' : 'string', missing, unique: uniq, total}
         if(numeric && numericVals.length){
+          const sorted = numericVals.slice().sort((a,b)=>a-b)
           const sum = numericVals.reduce((a,b)=>a+b,0)
           const mean = sum / numericVals.length
+          const median = sorted.length ? (sorted.length%2? sorted[Math.floor(sorted.length/2)] : (sorted[sorted.length/2-1]+sorted[sorted.length/2])/2) : null
+          const q1 = sorted.length ? sorted[Math.floor(sorted.length*0.25)] : null
+          const q3 = sorted.length ? sorted[Math.floor(sorted.length*0.75)] : null
           const sq = numericVals.reduce((a,b)=>a + (b-mean)*(b-mean),0)
           const std = Math.sqrt(sq / (numericVals.length-1 || 1))
-          info.mean = mean
-          info.std = std
-          info.min = Math.min(...numericVals)
-          info.max = Math.max(...numericVals)
+          info.mean = mean; info.std = std; info.min = Math.min(...numericVals); info.max = Math.max(...numericVals); info.median = median; info.q1 = q1; info.q3 = q3
+          // mode for numeric
+          const freq = {}
+          numericVals.forEach(v=> freq[v] = (freq[v]||0)+1)
+          info.mode = Object.entries(freq).sort((a,b)=>b[1]-a[1])[0]?.[0] ?? null
         }else{
-          info.mean = null; info.std=null; info.min=null; info.max=null
+          // categorical top categories
+          const freq = {}
+          nonMissing.forEach(v=> freq[v] = (freq[v]||0)+1)
+          const top = Object.entries(freq).sort((a,b)=>b[1]-a[1]).slice(0,5)
+          info.top_categories = top
+          info.mode = top.length? top[0][0] : null
+          info.mean = null; info.std = null; info.min = null; info.max = null; info.median = null; info.q1 = null; info.q3 = null
         }
         summary[c] = info
       }
@@ -357,6 +365,55 @@ export function DataProvider({children}){
       setError(e)
       return null
     }
+  }
+
+  // Run a full column-level summary using pandas if available (heavy) — returns object for that column
+  async function runFullColumnSummary(col){
+    if(!col) return null
+    if(pyodide){
+      try{
+        pyodide.globals.set('colname', col)
+        const code = `import json\ns = df[colname]\ninfo = {'dtype': str(s.dtype), 'missing': int(s.isnull().sum()), 'unique': int(s.nunique())}\ntry:\n    desc = s.describe()\n    info.update({'count': int(desc.get('count', 0)), 'mean': float(desc.get('mean', None)) if not desc.get('mean') is None else None, 'std': float(desc.get('std', None)) if not desc.get('std') is None else None, 'min': float(desc.get('min', None)) if not desc.get('min') is None else None, '25%': float(desc.get('25%', None)) if not desc.get('25%') is None else None, '50%': float(desc.get('50%', None)) if not desc.get('50%') is None else None, '75%': float(desc.get('75%', None)) if not desc.get('75%') is None else None, 'max': float(desc.get('max', None)) if not desc.get('max') is None else None})\nexcept Exception:\n    pass\ntry:\n    top = s.value_counts().head(10).to_dict()\n    info['top_categories'] = list(top.items())\nexcept Exception:\n    info['top_categories'] = []\njson.dumps(info)`
+        const out = await pyodide.runPythonAsync(code)
+        return JSON.parse(out.toString())
+      }catch(e){ setError(e); return null }
+    }
+    // JS fallback: return describeData()[col]
+    const s = await describeData()
+    return s ? s[col] : null
+  }
+
+  // Save current data snapshot (CSV) into IDB under a key. Uses Pyodide if available for accurate CSV, otherwise JS build.
+  async function saveCurrentDataToIDB(key){
+    try{
+      let csvText = null
+      if(pyodide){
+        try{
+          const out = await pyodide.runPythonAsync(`import io\nbuf = io.StringIO()\ndf.to_csv(buf, index=False)\nbuf.getvalue()`)
+          csvText = out.toString()
+        }catch(e){
+          console.warn('Failed to export CSV from pyodide df, falling back to JS:', e)
+        }
+      }
+      if(!csvText){
+        // build CSV from records snapshot
+        if(!records || records.length===0) return false
+        const cols = columns && columns.length? columns : Object.keys(records[0])
+        const lines = [cols.join(',')]
+        for(const r of records){
+          const row = cols.map(c=> {
+            const v = r[c]
+            if(v===null || v===undefined) return ''
+            const s = String(v).replace(/"/g,'""')
+            return s.includes(',') || s.includes('\n') ? `"${s}"` : s
+          })
+          lines.push(row.join(','))
+        }
+        csvText = lines.join('\n')
+      }
+      const blob = new Blob([csvText], {type:'text/csv'})
+      return await saveFileToIDB(key, blob)
+    }catch(e){ setError(e); return false }
   }
 
   async function trainModels(targetColumn){
@@ -429,7 +486,8 @@ export function DataProvider({children}){
     fillMissing,
     encodeCategoricals,
     trainModels
-    ,saveFileToIDB,getFileFromIDB, describeData
+    ,saveFileToIDB,getFileFromIDB, describeData, saveCurrentDataToIDB, runFullColumnSummary,
+    dropColumn, imputeColumn, normalizeColumn, encodeColumn, previewImputation
   }
 
   return (
