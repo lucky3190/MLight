@@ -276,7 +276,7 @@ export function DataProvider({children}){
     fillMissing,
     encodeCategoricals,
     trainModels
-    ,saveFileToIDB,getFileFromIDB
+    ,saveFileToIDB,getFileFromIDB, describeData
   }
 
   return (
